@@ -1,7 +1,8 @@
 """
-AvailabilityCalender - Phase 2 with view-rendering cache and access control.
+AvailabilityCalender - v2 with inline event times, extended day,
+and weekend columns.
 
-Connects to your real Google Calendar via the secret iCal URL configured
+Connects to Google Calendar via the secret iCal URL configured
 in .streamlit/secrets.toml.
 
 Run from a Command Prompt in this folder:
@@ -34,7 +35,7 @@ except ImportError:
 
 DISPLAY_TZ = ZoneInfo("America/New_York")
 DAY_START_HOUR = 8
-DAY_END_HOUR = 18
+DAY_END_HOUR = 19
 WEEKS_PER_PAGE = 3
 MAX_WEEKS_FORWARD = 52
 MAX_WEEKS_BACK = 0
@@ -43,10 +44,9 @@ PAGE_HORIZONTAL_MARGIN_PX = 80
 ICAL_CACHE_SECONDS = 300
 ICAL_FETCH_TIMEOUT_SECONDS = 30
 
-# Client tokens used throughout the app
 CLIENT_ABC = "abc"
 CLIENT_OTD = "otd"
-CLIENT_JD = "jd"  # full-access owner view
+CLIENT_JD = "jd"
 
 ABC_DOMAINS = {"abc.com"}
 OTD_DOMAINS = {"opentodebate.org"}
@@ -56,8 +56,6 @@ PREFIX_ABC = "abc"
 PREFIX_OTD = "otd"
 PREFIX_EXCEPTION = "exception"
 
-# Single regex matches any of: vacation, abc, otd, exception
-# at the start of a title, with optional colon, case-insensitive
 PREFIX_RE = re.compile(
     r"^\s*(vacation|abc|otd|exception)\s*:?\s+(.*)$",
     re.IGNORECASE,
@@ -83,12 +81,13 @@ COLOR_PERSONAL_BORDER = "#C4C0B0"
 COLOR_VACATION_BG = "#F5DEB3"
 COLOR_VACATION_FG = "#5A3A0A"
 COLOR_VACATION_BORDER = "#D8B878"
-COLOR_VACATION_DAY_BG = "#FAEAC8"      # soft tint for full vacation-day background
+COLOR_VACATION_DAY_BG = "#FAEAC8"
 COLOR_VACATION_DAY_BORDER = "#E8CBA0"
 COLOR_HOUR_LINE = "#D8E5CC"
 COLOR_TEXT_PRIMARY = "#2C2C2A"
 COLOR_TEXT_SECONDARY = "#5F5E5A"
 COLOR_TEXT_TERTIARY = "#888780"
+COLOR_WEEKEND_BORDER = "#E8E5DC"
 
 
 # -----------------------------------------------------------------------------
@@ -108,7 +107,7 @@ class Event:
 
 
 # -----------------------------------------------------------------------------
-# Access control - read keys from secrets, validate URL key
+# Access control
 # -----------------------------------------------------------------------------
 
 def _read_ical_url() -> str | None:
@@ -123,11 +122,6 @@ def _read_ical_url() -> str | None:
 
 
 def _read_access_keys() -> dict[str, str]:
-    """
-    Return a dict of {client_token: key_value} for keys defined in secrets.
-    Missing keys are simply absent from the dict.
-    Empty or placeholder keys are treated as missing.
-    """
     out: dict[str, str] = {}
     for client_token, secret_name in (
         (CLIENT_JD, "JD_KEY"),
@@ -145,7 +139,6 @@ def _read_access_keys() -> dict[str, str]:
 
 
 def _constant_time_equals(a: str, b: str) -> bool:
-    """Length-safe equality check that doesn't short-circuit on mismatch."""
     if len(a) != len(b):
         return False
     result = 0
@@ -155,10 +148,6 @@ def _constant_time_equals(a: str, b: str) -> bool:
 
 
 def _resolve_access(url_key: str) -> str | None:
-    """
-    Match the URL `key` parameter against configured secrets.
-    Returns the matching client token (CLIENT_JD/ABC/OTD) or None.
-    """
     if not url_key:
         return None
     keys = _read_access_keys()
@@ -193,10 +182,6 @@ def _cached_parse_events_window(
     window_start_iso: str,
     window_end_iso: str,
 ) -> list[Event]:
-    """
-    Parse iCal bytes into Event objects, restricted to a date window.
-    Cached on (raw_ical, window_start, window_end).
-    """
     window_start = datetime.fromisoformat(window_start_iso)
     window_end = datetime.fromisoformat(window_end_iso)
     return _parse_ical_to_events(raw_ical, window_start, window_end)
@@ -377,7 +362,7 @@ def _parse_ical_to_events(
 
 
 # -----------------------------------------------------------------------------
-# Privacy filtering
+# Privacy filtering (UNCHANGED from v1 - DO NOT MODIFY)
 # -----------------------------------------------------------------------------
 
 @dataclass
@@ -396,10 +381,6 @@ class RenderedEvent:
 
 
 def _strip_prefix(title: str) -> tuple[str | None, str]:
-    """
-    Strip ONE prefix off the title (the leftmost). Returns
-    (prefix_lower or None, remainder).
-    """
     if not title:
         return None, ""
     m = PREFIX_RE.match(title)
@@ -409,18 +390,6 @@ def _strip_prefix(title: str) -> tuple[str | None, str]:
 
 
 def _parse_prefixes(title: str) -> tuple[bool, str | None, str]:
-    """
-    Parse a title that may have an Exception: prefix followed by another
-    prefix (or none). Returns:
-      (is_exception, classification_prefix or None, displayable_text)
-
-    Examples:
-      "Exception: OTD prep call"  -> (True, "otd", "prep call")
-      "Exception: Family thing"   -> (True, None, "Family thing")
-      "OTD prep call"             -> (False, "otd", "prep call")
-      "Vacation: Greece"          -> (False, "vacation", "Greece")
-      "Random meeting"            -> (False, None, "Random meeting")
-    """
     if not title:
         return False, None, ""
 
@@ -428,28 +397,19 @@ def _parse_prefixes(title: str) -> tuple[bool, str | None, str]:
     first_prefix, rest = _strip_prefix(title)
     if first_prefix == PREFIX_EXCEPTION:
         is_exception = True
-        # Look for a second prefix on what's left
         second_prefix, deeper_rest = _strip_prefix(rest)
         if second_prefix and second_prefix != PREFIX_EXCEPTION:
             return True, second_prefix, deeper_rest
-        # No second prefix; remainder is plain personal text
         return True, None, rest
 
     return False, first_prefix, rest
 
 
 def _classify_owner(event: Event) -> tuple[str, str, bool]:
-    """
-    Returns (owner, reason, is_exception).
-    owner is one of "vacation", "abc", "otd", "personal".
-    is_exception is True if the title started with "Exception:" - meaning
-    the event punches through vacation suppression.
-    """
     is_exception, classification_prefix, _ = _parse_prefixes(event.title)
 
-    # Exception cannot itself be a Vacation marker
     if classification_prefix == PREFIX_VACATION:
-        return "vacation", "Vacation: prefix", False  # vacation never bears Exception
+        return "vacation", "Vacation: prefix", False
 
     if classification_prefix == PREFIX_ABC:
         reason = "ABC: prefix" + (" with Exception" if is_exception else "")
@@ -458,7 +418,6 @@ def _classify_owner(event: Event) -> tuple[str, str, bool]:
         reason = "OTD: prefix" + (" with Exception" if is_exception else "")
         return "otd", reason, is_exception
 
-    # No classification prefix - fall back to domain detection
     domains = set(event.attendee_domains)
     if event.organizer_domain:
         domains.add(event.organizer_domain.lower())
@@ -478,7 +437,6 @@ def _classify_owner(event: Event) -> tuple[str, str, bool]:
 
 
 def _displayed_title(event: Event) -> str:
-    """The title with all prefixes stripped, ready to show."""
     _, _, remainder = _parse_prefixes(event.title)
     return remainder if remainder else "Meeting"
 
@@ -486,7 +444,6 @@ def _displayed_title(event: Event) -> str:
 def filter_for_client(events: Iterable[Event], client: str) -> list[RenderedEvent]:
     out: list[RenderedEvent] = []
 
-    # Identify vacation date ranges
     vacation_dates: set[date] = set()
     for ev in events:
         owner, _, _ = _classify_owner(ev)
@@ -524,7 +481,6 @@ def filter_for_client(events: Iterable[Event], client: str) -> list[RenderedEven
             ))
             continue
 
-        # Client view
         if owner == "vacation":
             out.append(RenderedEvent(
                 title=LABEL_VACATION, start=ev.start, end=ev.end,
@@ -535,8 +491,6 @@ def filter_for_client(events: Iterable[Event], client: str) -> list[RenderedEven
             ))
             continue
 
-        # Suppress non-all-day events on vacation days, EXCEPT when the
-        # event is explicitly marked as an Exception.
         if (
             ev.start.date() in vacation_dates
             and not ev.all_day
@@ -583,7 +537,6 @@ def filter_for_client(events: Iterable[Event], client: str) -> list[RenderedEven
                     ))
             continue
 
-        # Hourly events (now potentially including vacation-day exceptions)
         if owner == "abc":
             if client == CLIENT_ABC:
                 out.append(RenderedEvent(
@@ -643,7 +596,35 @@ def _format_date_short(d: date) -> str:
     return d.strftime("%b %-d")
 
 
-def _clip_to_workday(ev: RenderedEvent, day: date) -> tuple[float, float] | None:
+def _format_event_inline_time(start: datetime, end: datetime) -> str:
+    """Format C: H:MM-H:MMam/pm. Drop :00 on the hour. Show am/pm
+    only on end time when both ends share the period."""
+    def _h12(dt):
+        h = dt.hour
+        if h == 0:
+            return 12
+        if h > 12:
+            return h - 12
+        return h
+
+    def _ampm(dt):
+        return "am" if dt.hour < 12 else "pm"
+
+    def _piece(dt, with_suffix):
+        h = _h12(dt)
+        m = dt.minute
+        suffix = _ampm(dt) if with_suffix else ""
+        if m == 0:
+            return f"{h}{suffix}"
+        return f"{h}:{m:02d}{suffix}"
+
+    same_period = _ampm(start) == _ampm(end)
+    if same_period:
+        return f"{_piece(start, False)}-{_piece(end, True)}"
+    return f"{_piece(start, True)}-{_piece(end, True)}"
+
+
+def _clip_to_workday(ev, day: date) -> tuple[float, float] | None:
     if ev.all_day:
         return None
     day_start = datetime.combine(day, time(DAY_START_HOUR, 0), tzinfo=DISPLAY_TZ)
@@ -667,7 +648,6 @@ def _allday_band_for_day(rendered: list[RenderedEvent], day: date) -> RenderedEv
 
 
 def _is_vacation_day(rendered: list[RenderedEvent], day: date) -> bool:
-    """Return True if any all-day event covering this day is a Vacation."""
     band = _allday_band_for_day(rendered, day)
     if band is None:
         return False
@@ -713,8 +693,8 @@ def render_pages_html(rendered_by_week: list[tuple[date, list[RenderedEvent]]],
       }}
       .av-week-grid {{
         display: grid;
-        grid-template-columns: 56px repeat(5, minmax(0, 170px));
-        gap: 8px;
+        grid-template-columns: 30px 90px repeat(5, minmax(0, 1fr)) 90px;
+        gap: 5px;
         justify-content: start;
       }}
       .av-day-card {{
@@ -750,13 +730,17 @@ def render_pages_html(rendered_by_week: list[tuple[date, list[RenderedEvent]]],
         position: absolute; left: 4px; right: 4px;
         border: 1px solid;
         border-radius: 6px;
-        padding: 4px 6px; font-size: 11px;
+        padding: 3px 6px; font-size: 11px;
         overflow: hidden; box-sizing: border-box;
-        line-height: 1.25;
+        line-height: 1.2;
         text-decoration: none; cursor: pointer;
       }}
       .av-event:hover, .av-allday-band:hover {{
         filter: brightness(0.96);
+      }}
+      .av-event-time {{
+        font-size: 9px; font-weight: 400; opacity: 0.75;
+        line-height: 1.1; margin-bottom: 1px;
       }}
       .av-event-detail {{ font-weight: 500; }}
       .av-event-described {{
@@ -770,7 +754,7 @@ def render_pages_html(rendered_by_week: list[tuple[date, list[RenderedEvent]]],
         font-size: 10px;
         color: {COLOR_TEXT_TERTIARY};
         text-align: right;
-        padding-right: 6px;
+        padding-right: 4px;
       }}
       .av-hour-label {{
         height: {hour_px}px;
@@ -784,9 +768,10 @@ def render_pages_html(rendered_by_week: list[tuple[date, list[RenderedEvent]]],
     parts = [css, f'<div class="av-root" style="padding: 0 {PAGE_HORIZONTAL_MARGIN_PX}px;">']
 
     for week_monday, rendered in rendered_by_week:
-        days = [week_monday + timedelta(days=i) for i in range(5)]
+        # Days: Sunday before Monday (-1), Mon-Fri (0..4), Saturday (5)
+        days = [week_monday + timedelta(days=i) for i in range(-1, 6)]
         week_label = (
-            f"Week of {_format_date_short(days[0])} - {_format_date_short(days[-1])}"
+            f"Week of {_format_date_short(days[1])} - {_format_date_short(days[5])}"
         )
         parts.append(f'<div class="av-week-header">{week_label}</div>')
         parts.append('<div class="av-week-grid">')
@@ -799,19 +784,28 @@ def render_pages_html(rendered_by_week: list[tuple[date, list[RenderedEvent]]],
         for d in days:
             band = _allday_band_for_day(rendered, d)
             is_vac = _is_vacation_day(rendered, d)
+            is_weekend = d.weekday() >= 5
 
-            # Day card: vacation days get an orange tint instead of mint
             if is_vac:
                 card_style = (
                     f"background: {COLOR_VACATION_DAY_BG}; "
                     f"border-color: {COLOR_VACATION_DAY_BORDER};"
                 )
+                header_border = COLOR_VACATION_DAY_BORDER
+            elif is_weekend:
+                card_style = (
+                    "background: transparent; "
+                    f"border-color: {COLOR_WEEKEND_BORDER}; "
+                    "opacity: 0.75;"
+                )
+                header_border = COLOR_WEEKEND_BORDER
             else:
                 card_style = ""
+                header_border = None
 
             parts.append(f'<div class="av-day-card" style="{card_style}">')
             parts.append('<div class="av-day-header"' +
-                          (f' style="border-bottom-color: {COLOR_VACATION_DAY_BORDER};"' if is_vac else '') +
+                          (f' style="border-bottom-color: {header_border};"' if header_border else '') +
                           '>')
             parts.append(f'<div class="av-day-name">{d.strftime("%a")}</div>')
             parts.append(f'<div class="av-day-date">{_format_date_short(d)}</div>')
@@ -852,19 +846,21 @@ def render_pages_html(rendered_by_week: list[tuple[date, list[RenderedEvent]]],
                     continue
                 s_h, e_h = clip
                 top = (s_h - DAY_START_HOUR) * hour_px
-                height = max((e_h - s_h) * hour_px - 2, 18)
+                height = max((e_h - s_h) * hour_px - 2, 24)
                 cls = "av-event"
                 if not ev.is_blocked_only:
                     cls += " av-event-detail"
                 if show_described_border and not ev.is_blocked_only:
                     cls += " av-event-described"
                 eid = _html_escape(ev.event_id)
+                inline_time = _format_event_inline_time(ev.start, ev.end)
                 parts.append(
                     f'<a href="?{key_param}event={eid}&v={client}" target="_self" '
                     f'class="{cls}" '
                     f'style="top: {top}px; height: {height}px; '
                     f'background: {ev.bg}; color: {ev.fg}; '
                     f'border-color: {ev.border};">'
+                    f'<div class="av-event-time">{_html_escape(inline_time)}</div>'
                     f'{_html_escape(ev.title)}'
                     '</a>'
                 )
@@ -878,7 +874,7 @@ def render_pages_html(rendered_by_week: list[tuple[date, list[RenderedEvent]]],
 
 
 # -----------------------------------------------------------------------------
-# Cached rendering of an entire view
+# Cached rendering
 # -----------------------------------------------------------------------------
 
 @st.cache_data(ttl=ICAL_CACHE_SECONDS, show_spinner=False)
@@ -892,7 +888,7 @@ def _render_view_cached(
     base_monday = date.fromisoformat(base_monday_iso)
     page_first_monday = base_monday + timedelta(weeks=page_offset_weeks)
     window_start = datetime.combine(
-        page_first_monday, time(0, 0), tzinfo=DISPLAY_TZ,
+        page_first_monday - timedelta(days=1), time(0, 0), tzinfo=DISPLAY_TZ,
     )
     window_end = datetime.combine(
         page_first_monday + timedelta(weeks=WEEKS_PER_PAGE),
@@ -906,10 +902,11 @@ def _render_view_cached(
     rendered_by_week: list[tuple[date, list[RenderedEvent]]] = []
     for week_idx in range(WEEKS_PER_PAGE):
         wm = page_first_monday + timedelta(weeks=week_idx)
-        wk_end_excl = wm + timedelta(days=7)
+        wk_start_incl = wm - timedelta(days=1)  # Sunday
+        wk_end_excl = wm + timedelta(days=6)  # next Saturday end
         wk_events = [
             ev for ev in rendered_all
-            if ev.start.date() < wk_end_excl and ev.end.date() >= wm
+            if ev.start.date() < wk_end_excl and ev.end.date() >= wk_start_incl
         ]
         rendered_by_week.append((wm, wk_events))
 
@@ -925,7 +922,6 @@ def _monday_of(d: date) -> date:
 
 
 def _set_query_params_preserving_key(url_key: str) -> None:
-    """Clear query params except `key`, preserving authentication."""
     try:
         st.query_params.clear()
         if url_key:
@@ -954,7 +950,7 @@ def _page_offset_for_month(month_first: date, base_monday: date) -> int:
     return max(0, min(delta_weeks, max_offset))
 
 
-def _format_event_time_range(rev: RenderedEvent) -> str:
+def _format_event_time_range(rev) -> str:
     if rev.all_day:
         s_d = rev.start.date()
         e_d = rev.end.date() - timedelta(days=1)
@@ -990,33 +986,27 @@ def _events_outside_window(
     rendered: list[RenderedEvent], week_monday: date
 ) -> list[RenderedEvent]:
     """
-    Return events that fall in the given week (Mon-Sun) but lie outside
-    the visible Mon-Fri 8am-6pm grid. Excludes all-day events (those are
-    rendered as bands at the top of the grid).
+    Weekends are now visible directly in the grid, so only weekday events
+    falling outside 8am-7pm surface in the modal.
     """
-    week_start = week_monday
-    week_end_excl = week_monday + timedelta(days=7)  # full Mon-Sun
+    week_start = week_monday - timedelta(days=1)  # Sunday
+    week_end_excl = week_monday + timedelta(days=6)  # next Saturday end
     out: list[RenderedEvent] = []
     for ev in rendered:
         if ev.all_day:
             continue
-        # Must fall within this week
         if ev.start.date() >= week_end_excl or ev.end.date() < week_start:
             continue
-        # Determine if any portion is outside Mon-Fri 8-6
-        ev_start_day = ev.start.weekday()  # 0=Mon, 6=Sun
+        ev_start_day = ev.start.weekday()
         ev_end_day = (ev.end - timedelta(microseconds=1)).weekday()
         ev_start_hour = ev.start.hour + ev.start.minute / 60.0
         ev_end_hour = ev.end.hour + ev.end.minute / 60.0
-        # If event is on weekend at all
-        is_weekend = ev_start_day >= 5 or ev_end_day >= 5
-        # If event is outside business hours on a weekday
         is_after_hours = (
             ev_start_day < 5 and ev_end_day < 5 and (
                 ev_end_hour <= DAY_START_HOUR or ev_start_hour >= DAY_END_HOUR
             )
         )
-        if is_weekend or is_after_hours:
+        if is_after_hours:
             out.append(ev)
     out.sort(key=lambda e: e.start)
     return out
@@ -1028,7 +1018,6 @@ def _show_outside_hours_modal(
     week_monday: date,
     url_key: str = "",
 ) -> None:
-    """Modal listing events that fall outside Mon-Fri 8am-6pm for one week."""
     week_label = (
         f"Week of {_format_date_short(week_monday)} - "
         f"{_format_date_short(week_monday + timedelta(days=4))}"
@@ -1044,7 +1033,6 @@ def _show_outside_hours_modal(
                 rev.start.strftime("%I:%M %p").lstrip("0") + " - " +
                 rev.end.strftime("%I:%M %p").lstrip("0")
             )
-            # Color swatch + label
             st.markdown(
                 f"<div style='display: flex; align-items: center; gap: 10px; "
                 f"padding: 8px 0; border-bottom: 1px solid #EEE;'>"
@@ -1065,7 +1053,6 @@ def _show_outside_hours_modal(
 
 @st.dialog("Event details")
 def _show_event_modal(rev: RenderedEvent, view: str, url_key: str = "") -> None:
-    """Modal shown when an event block is clicked. Re-applies privacy."""
     if view == CLIENT_JD:
         st.markdown(f"### {rev.title}")
         st.caption(_format_event_time_range(rev))
@@ -1098,7 +1085,6 @@ def main() -> None:
         layout="wide",
     )
 
-    # ---- Access control ----
     try:
         url_key = st.query_params.get("key", "")
     except Exception:
@@ -1121,7 +1107,6 @@ def main() -> None:
         )
         return
 
-    # User is authenticated. Initialize state.
     if "page_offset_weeks" not in st.session_state:
         st.session_state.page_offset_weeks = 0
 
@@ -1151,7 +1136,6 @@ def main() -> None:
     today = datetime.now(DISPLAY_TZ).date()
     base_monday = _monday_of(today)
 
-    # ---- View buttons (only for JD) ----
     if permitted_view == CLIENT_JD:
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -1174,7 +1158,6 @@ def main() -> None:
         }[st.session_state.view]
         st.caption(f"Currently viewing: {view_label}")
 
-    # Navigation
     nav1, nav2, nav3 = st.columns([1, 2, 1])
     with nav1:
         prev_disabled = st.session_state.page_offset_weeks <= 0
@@ -1210,7 +1193,7 @@ def main() -> None:
         weeks=st.session_state.page_offset_weeks
     )
     window_start = datetime.combine(
-        page_first_monday, time(0, 0), tzinfo=DISPLAY_TZ
+        page_first_monday - timedelta(days=1), time(0, 0), tzinfo=DISPLAY_TZ
     )
     window_end = datetime.combine(
         page_first_monday + timedelta(weeks=WEEKS_PER_PAGE),
@@ -1259,7 +1242,7 @@ def main() -> None:
         st.error(fetch_error)
         return
 
-    main_col, side_col = st.columns([6, 1])
+    main_col, side_col = st.columns([12, 1])
 
     with main_col:
         if raw is not None:
@@ -1272,7 +1255,6 @@ def main() -> None:
             )
             st.markdown(html, unsafe_allow_html=True)
 
-            # ---- Out-of-hours summary buttons (one per visible week) ----
             rendered_all = filter_for_client(events, st.session_state.view)
             for week_idx in range(WEEKS_PER_PAGE):
                 wm = page_first_monday + timedelta(weeks=week_idx)
@@ -1283,7 +1265,7 @@ def main() -> None:
                 noun = "event" if count == 1 else "events"
                 btn_label = (
                     f"Week of {_format_date_short(wm)}: "
-                    f"+ {count} weekend or evening {noun}"
+                    f"+ {count} early or late {noun}"
                 )
                 btn_key = f"outside_{wm.isoformat()}"
                 if st.button(btn_label, key=btn_key):
@@ -1291,17 +1273,14 @@ def main() -> None:
                     st.session_state["_outside_events"] = outside
                     st.rerun()
 
-            # If a per-week click was triggered, open the modal
             shown_for = st.session_state.get("_show_outside_for")
             if shown_for:
                 outside_events = st.session_state.get("_outside_events", [])
                 wm_obj = date.fromisoformat(shown_for)
-                # Clear before opening so it doesn't reopen on next rerun
                 del st.session_state["_show_outside_for"]
                 st.session_state.pop("_outside_events", None)
                 _show_outside_hours_modal(outside_events, wm_obj, url_key)
 
-            # ---- Click-to-modal: check ?event=<id> in URL ----
             try:
                 qp = st.query_params
                 event_id = qp.get("event", "")
@@ -1343,7 +1322,7 @@ def main() -> None:
                     unsafe_allow_html=True,
                 )
             else:
-                if st.button(label, key=btn_key, use_container_width=True):
+                if st.button(label, key=btn_key):
                     st.session_state.page_offset_weeks = _page_offset_for_month(
                         m, base_monday
                     )
