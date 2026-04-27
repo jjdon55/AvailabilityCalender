@@ -1,0 +1,50 @@
+# === LOCAL LAUNCHER (contains an access key) ===
+Run AvailabilityCalender.bat
+*.local.bat
+
+# === SECRETS — NEVER COMMIT ===
+.streamlit/secrets.toml
+.streamlit/secrets.toml.bak
+secrets.toml
+*.secret
+.env
+.env.*
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# === Virtual environments ===
+.venv/
+venv/
+env/
+ENV/
+
+# === IDE / editor ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# === OS metadata ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === Logs and backups ===
+*.log
+*.bak
+*.backup
+*.old
+
+# === Build / distribution ===
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+
+# === Streamlit local cache ===
+.streamlit/cache/
