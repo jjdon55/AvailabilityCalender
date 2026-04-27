@@ -113,7 +113,7 @@ class Event:
 
 def _read_ical_url() -> str | None:
     try:
-        url = st.secrets.get("JOHN_DONVAN_ICAL_URL", "")
+        url = st.secrets.get("ICAL_URL", "")
     except (FileNotFoundError, KeyError, AttributeError):
         return None
     url = (url or "").strip()
@@ -1114,7 +1114,7 @@ def main() -> None:
             "<h2 style='font-weight: 500; margin-bottom: 12px;'>Calendar private</h2>"
             "<p style='color: #5F5E5A; line-height: 1.5;'>"
             "This calendar is private. If you believe you should have access, "
-            "please contact John Donvan."
+            "please contact the calendar owner."
             "</p>"
             "</div>",
             unsafe_allow_html=True,
@@ -1143,7 +1143,7 @@ def main() -> None:
     st.markdown(
         "<h2 style='margin-bottom: 0.25rem;'>AvailabilityCalender</h2>"
         f"<p style='color: {COLOR_TEXT_SECONDARY}; margin-top: 0;'>"
-        "Live data from John Donvan's calendar."
+        "Live calendar availability."
         "</p>",
         unsafe_allow_html=True,
     )
@@ -1202,7 +1202,7 @@ def main() -> None:
     if not url:
         st.error(
             "No iCal URL configured. Edit `.streamlit/secrets.toml` and add "
-            "your Google Calendar secret iCal URL as `JOHN_DONVAN_ICAL_URL`."
+            "your Google Calendar secret iCal URL as `ICAL_URL`."
         )
         return
 
