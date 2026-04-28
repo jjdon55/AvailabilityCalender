@@ -6,6 +6,7 @@ rename_jd.py
 
 # === Local-only files (keep on disk, don't publish) ===
 ReadMe.pdf
+Handoff Memo.pdf
 
 # === LOCAL LAUNCHER (contains an access key) ===
 Run AvailabilityCalender.bat
