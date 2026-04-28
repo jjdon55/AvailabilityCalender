@@ -265,6 +265,16 @@ def _expand_recurrences(
         start_dt = _to_aware_datetime(start_val, all_day)
         end_dt = _to_aware_datetime(end_val, all_day)
 
+        # Heuristic: if the event spans a positive multiple of 24 hours,
+        # treat it as all-day even if iCal exported it as a datetime.
+        # Google Calendar sometimes exports all-day events as midnight
+        # datetimes rather than DATE-typed values.
+        if not all_day:
+            duration = end_dt - start_dt
+            total_seconds = duration.total_seconds()
+            if total_seconds > 0 and total_seconds % (24 * 3600) == 0:
+                all_day = True
+
         rrule = vevent.get("RRULE")
         if rrule is None:
             return [(start_dt, end_dt, all_day)]
@@ -453,6 +463,19 @@ def filter_for_client(events: Iterable[Event], client: str) -> list[RenderedEven
                 vacation_dates.add(d)
                 d += timedelta(days=1)
 
+    # Days where OTD has an all-day event - these should fully block
+    # the ABC column (hourly grid + band).
+    otd_allday_dates_for_abc: set[date] = set()
+    if client == CLIENT_ABC:
+        for ev in events:
+            owner, _, _ = _classify_owner(ev)
+            if owner == "otd" and ev.all_day:
+                d = ev.start.date()
+                while d < ev.end.date():
+                    if d not in vacation_dates:
+                        otd_allday_dates_for_abc.add(d)
+                    d += timedelta(days=1)
+
     for ev in events:
         owner, reason, is_exception = _classify_owner(ev)
         ev.classification_reason = f"{owner} ({reason})"
@@ -583,6 +606,29 @@ def filter_for_client(events: Iterable[Event], client: str) -> list[RenderedEven
                 classification=classification_str,
             ))
 
+    # For ABC: add a synthetic full-day "Not available" block on each
+    # day where OTD has an all-day event. ABC's own events render on top.
+    if client == CLIENT_ABC and otd_allday_dates_for_abc:
+        for blocked_date in otd_allday_dates_for_abc:
+            block_start = datetime.combine(
+                blocked_date, time(DAY_START_HOUR, 0), tzinfo=DISPLAY_TZ
+            )
+            block_end = datetime.combine(
+                blocked_date, time(DAY_END_HOUR, 0), tzinfo=DISPLAY_TZ
+            )
+            out.append(RenderedEvent(
+                title=LABEL_NOT_AVAILABLE,
+                start=block_start, end=block_end,
+                all_day=False,
+                bg=COLOR_NOT_AVAILABLE_BG,
+                fg=COLOR_NOT_AVAILABLE_FG,
+                border=COLOR_NOT_AVAILABLE_BORDER,
+                is_blocked_only=True,
+                event_id=f"otd-block-{blocked_date.isoformat()}",
+                full_title=LABEL_NOT_AVAILABLE,
+                classification="abc - blocked by OTD all-day",
+            ))
+
     return out
 
 
@@ -675,12 +721,18 @@ def _html_escape(s: str) -> str:
 
 def render_pages_html(rendered_by_week: list[tuple[date, list[RenderedEvent]]],
                        client: str,
-                       url_key: str = "") -> str:
+                       url_key: str = "",
+                       page_offset: int = 0) -> str:
     hours = list(range(DAY_START_HOUR, DAY_END_HOUR + 1))
     hour_count = DAY_END_HOUR - DAY_START_HOUR
     hour_px = 38
     show_described_border = client in (CLIENT_ABC, CLIENT_OTD)
-    key_param = f"key={_html_escape(url_key)}&" if url_key else ""
+    key_param_parts = []
+    if url_key:
+        key_param_parts.append(f"key={_html_escape(url_key)}")
+    if page_offset:
+        key_param_parts.append(f"offset={page_offset}")
+    key_param = ("&".join(key_param_parts) + "&") if key_param_parts else ""
 
     css = f"""
     <style>
@@ -714,9 +766,12 @@ def render_pages_html(rendered_by_week: list[tuple[date, list[RenderedEvent]]],
         margin-top: 2px;
       }}
       .av-allday-band {{
-        font-size: 11px; padding: 5px 8px; font-weight: 500;
-        border-bottom: 1px solid;
+        font-size: 11px; padding: 8px 8px 0 8px; font-weight: 500;
+        border-bottom: 1px solid {COLOR_HOUR_LINE};
         text-decoration: none; display: block; cursor: pointer;
+        height: 38px; box-sizing: border-box;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        line-height: 22px;
       }}
       .av-day-body {{
         position: relative;
@@ -750,7 +805,7 @@ def render_pages_html(rendered_by_week: list[tuple[date, list[RenderedEvent]]],
         border: 1.5px solid {COLOR_TEXT_PRIMARY} !important;
       }}
       .av-hours-col {{
-        padding-top: {18 + 30}px;
+        padding-top: 84px;
         font-size: 10px;
         color: {COLOR_TEXT_TERTIARY};
         text-align: right;
@@ -819,6 +874,7 @@ def render_pages_html(rendered_by_week: list[tuple[date, list[RenderedEvent]]],
                 parts.append(
                     f'<a href="?{key_param}event={eid}&v={client}" target="_self" '
                     f'class="av-allday-band{described_cls}" '
+                    f'title="{_html_escape(band.title)}" '
                     f'style="background: {band.bg}; color: {band.fg}; '
                     f'border-color: {band.border};">'
                     f'{_html_escape(band.title)}</a>'
@@ -826,7 +882,7 @@ def render_pages_html(rendered_by_week: list[tuple[date, list[RenderedEvent]]],
             else:
                 parts.append(
                     '<div class="av-allday-band" style="background: transparent; '
-                    'border-color: transparent; color: transparent; cursor: default;">.</div>'
+                    'border-color: transparent; color: transparent; cursor: default;"></div>'
                 )
 
             parts.append('<div class="av-day-body">')
@@ -910,7 +966,7 @@ def _render_view_cached(
         ]
         rendered_by_week.append((wm, wk_events))
 
-    return render_pages_html(rendered_by_week, client, url_key)
+    return render_pages_html(rendered_by_week, client, url_key, page_offset_weeks)
 
 
 # -----------------------------------------------------------------------------
@@ -923,9 +979,12 @@ def _monday_of(d: date) -> date:
 
 def _set_query_params_preserving_key(url_key: str) -> None:
     try:
+        offset_val = st.session_state.get("page_offset_weeks", 0)
         st.query_params.clear()
         if url_key:
             st.query_params["key"] = url_key
+        if offset_val:
+            st.query_params["offset"] = str(offset_val)
     except Exception:
         pass
 
@@ -1107,7 +1166,23 @@ def main() -> None:
         )
         return
 
-    if "page_offset_weeks" not in st.session_state:
+    # Read page offset from URL (so navigation preserves it),
+    # falling back to session state, then to 0.
+    try:
+        url_offset_str = st.query_params.get("offset", "")
+    except Exception:
+        url_offset_str = ""
+    url_offset = 0
+    if url_offset_str:
+        try:
+            url_offset = int(url_offset_str)
+        except (ValueError, TypeError):
+            url_offset = 0
+    if url_offset:
+        st.session_state.page_offset_weeks = max(
+            0, min(url_offset, MAX_WEEKS_FORWARD - WEEKS_PER_PAGE)
+        )
+    elif "page_offset_weeks" not in st.session_state:
         st.session_state.page_offset_weeks = 0
 
     if permitted_view == CLIENT_JD:
